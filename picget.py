@@ -246,7 +246,7 @@ class PicGetApp:
         ttk.Label(settings_frame, text="线程数量:").grid(row=3, column=0, sticky=tk.W, pady=5)
         self.video_thread_entry = ttk.Entry(settings_frame, width=10)
         self.video_thread_entry.grid(row=3, column=1, sticky=tk.W, padx=(5, 0), pady=5)
-        self.video_thread_entry.insert(0, "10")
+        self.video_thread_entry.insert(0, "50")
         
         progress_frame = ttk.LabelFrame(self.tab_video, text="下载进度", padding="10")
         progress_frame.pack(fill=tk.X)
