@@ -34,6 +34,7 @@ class PicGetApp:
         self.root.title("PicGet - 网站图片下载工具")
         self.root.geometry("900x700")  # 设置窗口大小为900x700像素
         self.root.resizable(True, True)  # 允许窗口缩放
+        self.root.state('zoomed')  # 窗口最大化显示
         
         # 初始化成员变量
         self.driver = None  # Selenium WebDriver（预留，当前未使用）
@@ -984,9 +985,9 @@ class PicGetApp:
         match = re.search(r'var _h="([^"]+)"', html_content)
         if match:
             encoded = match.group(1)
-            decoded = unquote(unquote(encoded))  # 双重解码
+            decoded = unquote(unquote(encoded))
             
-            # 从解码后的内容提取标题
+            # 提取标题 - decoded 已经是正确编码的字符串
             title_match = re.search(r'<title>([^<]+)</title>', decoded)
             if title_match:
                 title = title_match.group(1).strip()
@@ -1226,12 +1227,14 @@ class PicGetApp:
             response = requests.get(base_url, headers=headers, timeout=15)
             response.raise_for_status()
             
-            # 提取图片和标题
+            # 尝试提取图片和标题
             img_urls, title = self.extract_images_from_encoded_html(response.text)
             
-            if not img_urls:
-                error_msg = "未找到图片"
-                raise Exception(error_msg)
+            # 从URL路径中提取标题作为备用
+            if not title:
+                path_match = re.search(r'/art/([^/]+)/', base_url)
+                if path_match:
+                    title = path_match.group(1)
             
             page_name = title if title else "images"
             
@@ -1273,6 +1276,42 @@ class PicGetApp:
                 else:
                     page_urls.append((base_url, page_name))
                     total_pages = 1
+            
+            # 备用逻辑：如果 var_h 不存在，从原始HTML中查找分页链接
+            if not page_urls:
+                # 查找所有 index_N.html 链接
+                index_links = re.findall(r'href="([^"]*index_(\d+)\.html)"', response.text)
+                if index_links:
+                    # findall 返回元组列表 (完整匹配, 页码)，用索引访问
+                    max_page = max(int(m[1]) for m in index_links)
+                    total_pages = max_page
+                    
+                    # 提取基础路径
+                    first_link = index_links[0][0]
+                    base_path = first_link.rsplit('/index_', 1)[0].lstrip('/')
+                    
+                    for i in range(1, total_pages + 1):
+                        if i == 1:
+                            page_url = base_url
+                        else:
+                            page_url = f"{parsed.scheme}://{parsed.netloc}/{base_path}/index_{i}.html"
+                        
+                        if i == 1:
+                            page_name_i = title if title else "images"
+                        else:
+                            page_name_i = f"{title}_{i}" if title else f"page_{i}"
+                        
+                        page_urls.append((page_url, page_name_i))
+            
+            # 如果仍然没有分页，至少添加当前页面
+            if not page_urls:
+                page_urls.append((base_url, page_name))
+                total_pages = 1
+            
+            # 检查是否成功找到分页
+            if not page_urls or (len(page_urls) == 1 and page_urls[0][0] == base_url and total_pages == 1):
+                error_msg = "未找到分页信息"
+                raise Exception(error_msg)
             
             results = page_urls
             result_count = len(results)
@@ -1350,29 +1389,53 @@ class PicGetApp:
                 
                 # 尝试解码内容
                 match = re.search(r'var _h="([^"]+)"', response.text)
+                page_urls = []  # 存储详情页URL
+                
                 if match:
                     encoded = match.group(1)
                     decoded = unquote(unquote(encoded))
                     
-                    # 优先在tpl-img-content div中查找链接
-                    div_match = re.search(r'<div[^>]+id="tpl-img-content"[^>]*>(.*?)</div>', decoded, re.DOTALL)
-                    if div_match:
-                        links = re.findall(r'<a[^>]+href="([^"]+)"', div_match.group(1))
-                    else:
-                        links = re.findall(r'<a[^>]+href="([^"]+)"', decoded)
+                    # 查找详情页链接（如 /art/toupaizipai/764307/）
+                    # 模式：/art/分类名/数字/
+                    category = re.search(r'/art/([^/]+)/', url)
+                    if category:
+                        category_name = category.group(1)
+                        # 查找该分类下的详情页链接
+                        links = re.findall(r'<a[^>]+href="(/art/' + category_name + r'/\d+/)"', decoded)
+                        
+                        for link in links:
+                            full_url = 'https://www.v6491h.com' + link
+                            page_urls.append(full_url)
                     
-                    # 处理链接并添加到列表
-                    for link in links:
-                        if link and link.startswith('/'):
-                            if prefix:
-                                full_url = prefix + link
-                            else:
-                                full_url = link
-                            self.root.after(0, lambda u=full_url: self.img_listbox.insert(tk.END, u))
-                    
-                    # 统计找到的链接数
-                    found_count += len([l for l in links if l and l.startswith('/')])
-                    self.root.after(0, lambda c=len([l for l in links if l and l.startswith('/')]), u=url: self.batch_log_message(f"提取 {c} 个页面: {u}"))
+                    # 如果上面的模式没匹配，尝试通用模式
+                    if not page_urls:
+                        # 查找所有 /art/数字/ 模式的链接
+                        links = re.findall(r'<a[^>]+href="(/art/\d{6,}/)"', decoded)
+                        for link in links:
+                            full_url = 'https://www.v6491h.com' + link
+                            if full_url not in page_urls:
+                                page_urls.append(full_url)
+                
+                # 没有 var_h，从原始HTML查找详情页链接
+                if not page_urls:
+                    # 查找 /art/分类名/数字/ 模式
+                    category = re.search(r'/art/([^/]+)/', url)
+                    if category:
+                        category_name = category.group(1)
+                        links = re.findall(r'href="(/art/' + category_name + r'/\d+/)"', response.text)
+                        for link in links:
+                            full_url = 'https://www.v6491h.com' + link
+                            page_urls.append(full_url)
+                
+                # 去重
+                page_urls = list(set(page_urls))
+                
+                # 添加到列表
+                for page_url in page_urls[:100]:  # 限制数量
+                    self.root.after(0, lambda u=page_url: self.img_listbox.insert(tk.END, u))
+                
+                found_count = len(page_urls)
+                self.root.after(0, lambda c=found_count, u=url: self.batch_log_message(f"提取 {c} 个详情页: {u}"))
                 
                 # 随机延时
                 self.random_delay(base_delay)
@@ -1408,6 +1471,7 @@ class PicGetApp:
         
         # 收集选中的图片URL
         img_urls = []
+        
         for idx in selected_indices:
             item = self.img_listbox.get(idx)
             if item.startswith("---") or item.startswith("正在分析"):
@@ -1454,11 +1518,18 @@ class PicGetApp:
                 response = requests.get(page_url, headers=headers, timeout=30)
                 response.raise_for_status()
                 
-                # 提取图片和标题
-                img_urls_on_page, title = self.extract_images_from_encoded_html(response.text)
+                # 提取图片URL和标题
+                img_urls_on_page, page_title = self.extract_images_from_encoded_html(response.text)
                 
-                # 创建保存文件夹
-                folder_name = self.sanitize_folder_name(title)
+                # 用当前详情页的标题作为文件夹名称
+                if page_title:
+                    folder_name = self.sanitize_folder_name(page_title)
+                else:
+                    # 如果没有标题，从URL提取
+                    match = re.search(r'/art/([^/]+)/', page_url)
+                    folder_name = match.group(1) if match else "images"
+                
+                # 为每个详情页创建独立的保存文件夹
                 page_save_path = os.path.join(save_path, folder_name)
                 os.makedirs(page_save_path, exist_ok=True)
                 
